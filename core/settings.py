@@ -123,6 +123,16 @@ AUTH_PASSWORD_VALIDATORS = [
     },
 ]
 
+DJOSER = {
+    'LOGIN_BY_EMAIL': False,
+    'RESET_PASSWORD_EMAILS_REQUIRED': False,
+    'AUTH_TOKEN_CLASSES': ('rest_framework.authtoken.models.Token',),
+    'SERIALIZERS': {
+        'user_create': 'accounts.serializers.UserCreateSerializer',
+        'user': 'accounts.serializers.UserSerializer',
+    },
+}
+
 
 # Internationalization
 # https://docs.djangoproject.com/en/6.0/topics/i18n/

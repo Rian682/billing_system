@@ -8,40 +8,39 @@ class OrderItemSerializer(serializers.ModelSerializer):
     class Meta:
         model = OrderItem
         fields = ['id', 'product', 'product_name', 'quantity', 'price']
-        read_only_fields = ['id', 'price']  # Price set automatically from product
+        read_only_fields = ['id', 'price']
 
 
 class OrderCreateSerializer(serializers.ModelSerializer):
-    items = OrderItemSerializer(many=True)  # Nested serializer for multiple products
+    items = OrderItemSerializer(many=True)  #Nested serializer for multiple products
     
     class Meta:
         model = Order
         fields = ['customer', 'payment_status', 'items']
     
     def create(self, validated_data):
-        items_data = validated_data.pop('items')  # Extract nested items
+        items_data = validated_data.pop('items')
         
-        # Create order
+        #Create order
         order = Order.objects.create(
             customer=validated_data['customer'],
             payment_status=validated_data['payment_status'],
-            created_by=self.context['request'].user  # Get user from request
+            created_by=self.context['request'].user  #Get user from request
         )
         
         total = 0
         
-        # Create order items and update inventory
+        #Create order items and update inventory
         for item_data in items_data:
             product = item_data['product']
             quantity = item_data['quantity']
             
-            # Check stock availability
             if product.quantity < quantity:
                 raise serializers.ValidationError(
                     f"Insufficient stock for {product.name}. Available: {product.quantity}"
                 )
             
-            # Create order item with current selling price
+            #Create order item with current selling price
             order_item = OrderItem.objects.create(
                 order=order,
                 product=product,
@@ -49,14 +48,13 @@ class OrderCreateSerializer(serializers.ModelSerializer):
                 price=product.selling_price  # Lock in current price
             )
             
-            # Decrease inventory
+            #Decrease inventory
             product.quantity -= quantity
             product.save()
             
-            # Calculate total
             total += order_item.price * order_item.quantity
         
-        # Update order total
+        #Update order total
         order.total_amount = total
         order.save()
         
@@ -79,6 +77,10 @@ class OrderListSerializer(serializers.ModelSerializer):
     def get_items_count(self, obj):
         return obj.items.count()
 
+class OrderUpdateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Order
+        fields = ['payment_status']
 
 class OrderDetailSerializer(serializers.ModelSerializer):
     customer = serializers.SerializerMethodField()
@@ -103,7 +105,6 @@ class OrderDetailSerializer(serializers.ModelSerializer):
         }
     
     def get_profit(self, obj):
-        """Calculate total profit - only for managers"""
         request = self.context.get('request')
         if request and hasattr(request.user, 'role') and request.user.role == 'manager':
             profit = 0
