@@ -8,13 +8,12 @@ class ProductSerializer(serializers.ModelSerializer):
     class Meta:
         model = Product
         fields = ['id', 'name', 'purchase_price', 
-                  'selling_price', 'quantity', 'minimum_stock_level', 
+                  'selling_price', 'quantity', 'min_stock_level', 
                   'is_active', 'created_at', 'is_low_stock', 'profit_margin']
 
         read_only_fields = ['id', 'created_at']
     
     def get_is_low_stock(self, obj):
-        """Check if stock is below minimum level"""
         return obj.quantity < obj.min_stock_level
     
     def get_profit_margin(self, obj):
@@ -25,7 +24,6 @@ class ProductSerializer(serializers.ModelSerializer):
 
 
 class ProductListSerializer(serializers.ModelSerializer):
-    """For staff - hide purchase_price"""
     is_low_stock = serializers.SerializerMethodField()
     
     class Meta:

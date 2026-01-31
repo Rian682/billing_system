@@ -9,7 +9,7 @@ _product_old_values = {}
 # This will run before Product is saved
 # We save old values of the product here to compare later.
 @receiver(pre_save, sender=Product)
-def track_product_changes(sender, instance, created, **kwargs):
+def track_product_changes(sender, instance, **kwargs):
     if instance.pk:
         try:
             old_product = Product.objects.get(pk=instance.pk)
@@ -37,7 +37,7 @@ def log_product_changes(sender, instance, created, **kwargs):
         if old_values.get('purchase_price') != instance.purchase_price:
             AuditLog.objects.create(
                 product=instance,
-                action=f"Purchase price changed from ${old_values["purchanse_price"]} to ${instance.purchase_price}",
+                action=f"Purchase price changed from ${old_values["purchase_price"]} to ${instance.purchase_price}",
                 changed_by=None
             )
 
