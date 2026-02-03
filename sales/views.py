@@ -55,6 +55,38 @@ class OrderViewSet(viewsets.ModelViewSet):
         elif self.action in ['update', 'partial_update']:
             return OrderUpdateSerializer
         return OrderDetailSerializer
+    
+    #For cancelled orders
+    def perform_update(self, serializer):
+        old_instance = self.get_object()
+        old_status = old_instance.payment_status
+        new_status = serializer.validated_data.get('payment_status')
+        
+        # Prevent cancelling paid orders
+        if old_status == 'paid' and new_status == 'cancelled':
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({"error": "Cannot cancel a paid order"})
+        
+        # Save the update
+        instance = serializer.save()
+        
+        # Check if order was just cancelled
+        if old_status != 'cancelled' and new_status == 'cancelled':
+            # Restore inventory for each item
+            from inventory.models import Product, AuditLog
+            
+            for item in instance.items.all():
+                product = item.product
+                product.quantity += item.quantity  # Add back the quantity
+                product.save()
+                
+                # Create audit log
+                AuditLog.objects.create(
+                    product=product,
+                    action=f"Stock increased by {item.quantity} due to order #{instance.invoice_id} cancellation",
+                    changed_by=self.request.user
+                )
+
 
     #Generate and download PDF invoice for an order
     @action(detail=True, methods=['get'], url_path='invoice-pdf')
@@ -87,17 +119,6 @@ class OrderViewSet(viewsets.ModelViewSet):
         table_data.append(['', '', 'Total:', f"${order.total_amount:.2f}"])
 
         table = Table(table_data)
-        # table.setStyle(TableStyle([
-        #     ('Background', (0, 0), (-1, 0), colors.darkblue),
-        #     ('TextColor', (0, 0), (-1, 0), colors.white),
-        #     ('Align', (0, 0), (-1, -1), 'CENTER'),
-        #     ('FontName', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        #     ('FontSize', (0, 0), (-1, 0), 12),
-        #     ('BottomPadding', (0, 0), (-1, 0), 12),
-        #     ('Background', (0, -1), (-1, -1), colors.beige),
-        #     ('FontName', (0, -1), (-1, -1), 'Helvetica-Bold'),
-        #     ('Grid', (0, 0), (-1, -1), 1, colors.black),
-        # ]))
         elements.append(table)
 
         doc.build(elements)
@@ -152,23 +173,6 @@ class OrderViewSet(viewsets.ModelViewSet):
             ])
         return data
 
-    # def _get_customer_wise_data(self):
-    #     customers = Order.objects.values(
-    #         'customer__name', 'customer__phone'
-    #     ).annotate(
-    #         total_orders=Count('id'),
-    #         total_spent=Sum('total_amount')
-    #     ).order_by('-total_spent')
-
-    #     data = []
-    #     for row in customers:
-    #         data.append([
-    #             row['customer__name'],
-    #             row['customer__phone'],
-    #             row['total_orders'],
-    #             f"{row['total_spent']:.2f}"
-    #         ])
-    #     return data
 
     def _export_csv(self, headers, data, report_type):
         response = HttpResponse(content_type='text/csv')
@@ -178,85 +182,107 @@ class OrderViewSet(viewsets.ModelViewSet):
         writer.writerows(data)
         return response
 
-    # def _export_excel(self, headers, data, report_type):
-    #     wb = Workbook()
-    #     ws = wb.active
-    #     ws.title = report_type.replace('_', ' ').title()
-
-    #     # Header row with styling
-    #     ws.append(headers)
-    #     header_font = Font(bold=True, color='FFFFFF')
-    #     header_fill = PatternFill(start_color='000080', end_color='000080', fill_type='solid')
-    #     for cell in ws[1]:
-    #         cell.font = header_font
-    #         cell.fill = header_fill
-
-    #     # Data rows
-    #     for row in data:
-    #         ws.append(row)
-
-    #     # Auto-width columns
-    #     for column in ws.columns:
-    #         max_length = max(len(str(cell.value or '')) for cell in column)
-    #         ws.column_dimensions[column[0].column_letter].width = max_length + 2
-
-    #     buffer = BytesIO()
-    #     wb.save(buffer)
-    #     buffer.seek(0)
-
-    #     response = HttpResponse(
-    #         buffer.getvalue(),
-    #         content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-    #     )
-    #     response['Content-Disposition'] = f'attachment; filename="{report_type}_report.xlsx"'
-    #     return response
 
 
 class DashboardView(APIView):
     permission_classes = [IsStaffOrManager]
 
     def get(self, request):
-        today = datetime.now().date()
+        from datetime import datetime
 
-        total_sales = Order.objects.filter(
+        #Query params
+        start_date = request.query_params.get('start_date')
+        end_date = request.query_params.get('end_date')
+
+        #Determine what kind of filter we have
+        if start_date and end_date:
+            start = datetime.strptime(start_date, '%Y-%m-%d').date()
+            end = datetime.strptime(end_date, '%Y-%m-%d').date()
+            is_date_range = (start_date != end_date)    #is_date_range = True
+
+            if is_date_range:   #if start_date is not equal to end date so there's a date range
+                today = datetime.now().date()
+            else:
+                today = start
+
+        else:   #No filter condition
+            today = datetime.now().date()
+            is_date_range = False
+            start, end = None, None
+
+
+        ### Today's data
+        best_selling_product_today = OrderItem.objects.filter(
+            order__created_at__date=today
+        ).values(
+            'product__id', 'product__name'
+        ).annotate(total_sold=Sum('quantity'))
+
+        paid_orders_today = Order.objects.filter(
+            created_at__date=today, payment_status='paid').count()
+
+        total_sales_today = Order.objects.filter(
             created_at__date=today
         ).aggregate(
             total=Sum('total_amount')
         )['total'] or 0
 
+        cancelled_orders_today = Order.objects.filter(
+            created_at__date=today, payment_status='cancelled').count()
+
+
+        ### Overall (all time) data
+
+        #These are always all time data
         pending_orders = Order.objects.filter(
             payment_status='unpaid'
         ).count()
 
-        total_paid_orders = Order.objects.filter(created_at__date=today, payment_status='paid').count()
+        total_active_users = User.objects.filter(is_active=True).count()
+        
+        #These depend on whether we have a date range or not
+        if is_date_range:
+            total_cancelled_orders = Order.objects.filter(
+                payment_status='cancelled',
+                created_at__date__gte=start,
+                created_at__date__lte=end
+                ).count()
+        else:
+            best_selling_product_today = OrderItem.objects.filter(
+            order__created_at__date=today
+            ).values(
+                'product__id', 'product__name'
+            ).annotate(total_sold=Sum('quantity'))
+            total_cancelled_orders =  Order.objects.filter(payment_status='cancelled').count()
 
+        #These are always current state
         from inventory.models import Product
         low_stock_products = Product.objects.filter(
             is_active = True,
             quantity__lt=F('min_stock_level')   #When quantity is less than(lt) min stock level
             ).values('id', 'name', 'quantity')
         
-        deleted_products = Product.objects.filter(
-            is_active = False,
-            ).values('id', 'name')
-
-        total_active_users = User.objects.filter(is_active=True).count()
-        
-        
+        # deleted_products = Product.objects.filter(
+        #     is_active = False,
+        #     ).values('id', 'name')
 
 
         data = {
-            'paid_orders_today': total_paid_orders,
-            'total_sales_today': float(total_sales),
+            'best_selling_product_today': best_selling_product_today,
+            'paid_orders_today': paid_orders_today,
+            'total_sales_today': float(total_sales_today),
+            'cancelled_orders_today': cancelled_orders_today,
             'pending_orders': pending_orders,
-            'total_acitve_users': total_active_users,
+            'total_cancelled_orders': total_cancelled_orders,
+            'total_active_users': total_active_users,
             'low_stock_products': low_stock_products,
-            'deleted_products': deleted_products,
+            # 'deleted_products': deleted_products,
         }
 
 
         # Only managers see profit
         if request.user.role == 'manager':
+            #Today's profit
             total_profit = OrderItem.objects.filter(
                 order__created_at__date=today
             ).aggregate(
@@ -268,5 +294,32 @@ class DashboardView(APIView):
                 )
             )['profit'] or 0
             data['total_profit_today'] = float(total_profit)
+
+            #Overall profit (all-time or date range)
+            if is_date_range:
+                #Profit within date range
+                overall_profit = OrderItem.objects.filter(
+                    order__created_at__date__gte=start,
+                    order__created_at__date__lte=end_date
+                ).aggregate(
+                    profit=Sum(
+                        ExpressionWrapper(
+                            (F('price') - F('product__purchase_price')) * F('quantity'),
+                            output_field=DecimalField()
+                        )
+                    )
+                )['profit'] or 0
+            
+            else:
+                #All time profit
+                overall_profit = OrderItem.objects.aggregate(
+                    profit=Sum(
+                        ExpressionWrapper(
+                            (F('price') - F('product__purchase_price')) * F('quantity'),
+                            output_field=DecimalField()
+                        )
+                    )
+                )['profit'] or 0
+            data['overall_profit'] = float(overall_profit)
 
         return Response(data)
